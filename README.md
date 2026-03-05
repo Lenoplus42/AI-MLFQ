@@ -1,4 +1,4 @@
-# AIOS Supervisor: MLFQ-based LLM Scheduler
+# AI-LMFQ: MLFQ-based LLM Scheduler
 ## Motivation
 In concurrent multi-agent environments, treating an LLM API call as an indivisible, blocking request leads to catastrophic **Head-of-Line (HoL) blocking**. When compute-heavy background tasks (e.g., large codebase analysis or web scraping) monopolize the inference engine, latency-sensitive interactive agents suffer from severe P99 tail latency spikes. 
 
@@ -14,4 +14,4 @@ By implementing a **Multi-Level Feedback Queue (MLFQ)**:
 2. **Zero-Waste Context Switching:** Because modern inference engines retain or page out the KV cache, preempted tasks can be suspended and resumed later without redundant prefill recomputation.
 3. **Latency Isolation:** Interactive agents remain in the top-tier queue, receiving immediate compute resources, while batch-processing agents utilize system idle cycles.
 
-
+This is an ongoing project building by Lennox, purely for fun.
