@@ -8,8 +8,8 @@ func (q *MLFQQueue) Enqueue(task *AgentTask) {
 	// at, for example, 10k concurrent agents, the bottleneck could be LLM network I/O, 
 	// not lock contention. Avoid premature optimization here, will profile later and see if we need to change.
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.tasks = append(q.tasks, task) // "Job starts in highest priority queue." -- CS162
+	defer q.mu.Unlock() // Auto unlocks when function exits
+	q.tasks = append(q.tasks, task) // "In MLFQ... Job starts in highest priority queue." -- CS162
 }
 
 // Dequeue removes and returns the task at the front of this queue level.
@@ -27,7 +27,7 @@ func (q *MLFQQueue) Dequeue() *AgentTask {
 	return task
 }
 
-// Returns the number of tasks currently in this queue.
+// Concurrency Safe method that returns the number of tasks currently in this queue.
 func (q *MLFQQueue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
