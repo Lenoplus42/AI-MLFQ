@@ -84,9 +84,10 @@ func (s *MLFQScheduler) Tick() {
 	}
 
 	// Condition C — still has tokens left and quantum is not exhausted; continue
-	// in the same queue.
+	// in the same queue. Re-insert at the front so this task holds the CPU for
+	// its full quantum rather than yielding to every other Q0 peer after 1 tick.
 	task.State = StateReady
-	currentQueue.Enqueue(task)
+	currentQueue.EnqueueFront(task)
 }
 
 // PrintStatus logs the current depth of every queue level.

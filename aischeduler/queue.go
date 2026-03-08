@@ -12,6 +12,15 @@ func (q *MLFQQueue) Enqueue(task *AgentTask) {
 	q.tasks = append(q.tasks, task) // "In MLFQ... Job starts in highest priority queue." -- CS162
 }
 
+// EnqueueFront inserts a task at the head of the queue, giving it priority
+// over all other waiting tasks at this level. Used by Condition C to let a
+// running task hold the CPU for its full quantum without interleaving.
+func (q *MLFQQueue) EnqueueFront(task *AgentTask) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.tasks = append([]*AgentTask{task}, q.tasks...)
+}
+
 // Dequeue removes and returns the task at the front of this queue level.
 // Returns nil when the queue is empty.
 func (q *MLFQQueue) Dequeue() *AgentTask {
