@@ -2,19 +2,33 @@ package aischeduler
 
 import (
 	"fmt"
+	"io"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"time"
 )
 
-const (
-	interactiveRatio   = 0.80
-	interactiveMinToks = 10
-	interactiveMaxToks = 50
-	heavyMinToks       = 500
-	heavyMaxToks       = 1000
-)
+// SimConfig is the single source of truth for every tunable parameter in a
+// simulation run. Pass it by value; zero values are intentionally invalid so
+// callers must be explicit.
+type SimConfig struct {
+	NumTasks    int
+	InteractiveRatio float64
+	InteractiveToks  [2]int // [min, max] tokens for interactive tasks
+	HeavyToks        [2]int // [min, max] tokens for heavy-batch tasks
+
+	ArrivalIntervalTicks int // ticks between successive task arrivals
+
+	// Physical GPU constraints — scaffolding for the VRAM eviction layer.
+	MaxKVCacheTokens         int // total VRAM capacity expressed in KV-cache tokens
+	ContextSwitchPenaltyTicks int // PCIe page-out + page-in cost when evicting a task
+
+	// If non-empty, the benchmark report is written to this path in addition
+	// to being printed to stdout.
+	ReportFilepath string
+}
 
 // taskClass tags a task's workload category for metric segregation.
 type taskClass int
@@ -41,16 +55,20 @@ type SimResult struct {
 	heavy       []*taskRecord
 }
 
-// GenerateWorkload produces numTasks AgentTasks with an 80/20 interactive-to-heavy
-// split. It returns two independent deep copies so FIFO and MLFQ runs are identical.
-func GenerateWorkload(numTasks int) ([]*AgentTask, []*AgentTask) {
+// GenerateWorkload produces cfg.NumTasks AgentTasks according to the
+// interactive/heavy split defined in cfg. Returns two independent deep copies
+// so FIFO and MLFQ runs operate on identical but unshared data.
+func GenerateWorkload(cfg SimConfig) ([]*AgentTask, []*AgentTask) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	original := make([]*AgentTask, numTasks)
+	interMin, interMax := cfg.InteractiveToks[0], cfg.InteractiveToks[1]
+	heavyMin, heavyMax := cfg.HeavyToks[0], cfg.HeavyToks[1]
+
+	original := make([]*AgentTask, cfg.NumTasks)
 	for i := range original {
-		tokens := interactiveMinToks + rng.Intn(interactiveMaxToks-interactiveMinToks+1)
-		if float64(i)/float64(numTasks) >= interactiveRatio {
-			tokens = heavyMinToks + rng.Intn(heavyMaxToks-heavyMinToks+1)
+		tokens := interMin + rng.Intn(interMax-interMin+1)
+		if float64(i)/float64(cfg.NumTasks) >= cfg.InteractiveRatio {
+			tokens = heavyMin + rng.Intn(heavyMax-heavyMin+1)
 		}
 		original[i] = &AgentTask{
 			TaskID:         fmt.Sprintf("task-%04d", i),
@@ -58,13 +76,11 @@ func GenerateWorkload(numTasks int) ([]*AgentTask, []*AgentTask) {
 		}
 	}
 
-	// Shuffle so heavy tasks are not clustered at the tail.
+	// Scatter heavy tasks throughout the slice so they are not clustered at
+	// the tail, which would artificially favour MLFQ.
 	rng.Shuffle(len(original), func(i, j int) { original[i], original[j] = original[j], original[i] })
-	
-	// Deep copy to keep task list exact same, for precise comparison.
-	fifo := deepCopyTasks(original)
-	mlfq := deepCopyTasks(original)
-	return fifo, mlfq
+
+	return deepCopyTasks(original), deepCopyTasks(original)
 }
 
 func deepCopyTasks(src []*AgentTask) []*AgentTask {
@@ -77,46 +93,51 @@ func deepCopyTasks(src []*AgentTask) []*AgentTask {
 }
 
 // classifyTask returns classInteractive when TokensRequired falls within the
-// interactive band, classHeavy otherwise.
-func classifyTask(t *AgentTask) taskClass {
-	if t.TokensRequired <= interactiveMaxToks {
+// interactive band defined by cfg, classHeavy otherwise.
+func classifyTask(t *AgentTask, cfg SimConfig) taskClass {
+	if t.TokensRequired <= cfg.InteractiveToks[1] {
 		return classInteractive
 	}
 	return classHeavy
 }
 
-// RunSimulation submits all tasks to scheduler, drives Tick() until every task
-// reaches StateDone, and returns a SimResult with per-task tick observations.
-func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask) SimResult {
+// RunSimulation drives the scheduler until every submitted task reaches
+// StateDone, feeding tasks one-at-a-time at cfg.ArrivalIntervalTicks cadence
+// to replicate realistic Poisson-ish traffic rather than a thundering herd.
+func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cfg SimConfig) SimResult {
 	records := make([]*taskRecord, len(tasks))
 	for i, t := range tasks {
 		records[i] = &taskRecord{
 			task:  t,
-			class: classifyTask(t),
+			class: classifyTask(t, cfg),
 		}
 	}
 
-	// Snapshot arrival tick before submitting (SubmitTask overwrites ArrivalTime
-	// with wall-clock; we capture the tick count here instead).
-	tick := 0
-	for _, r := range records {
-		r.arrivalTick = tick
-		scheduler.SubmitTask(r.task)
-	}
-
-	pending := len(tasks)
-	// Track which tasks have been observed as done each tick to capture doneTick.
-	doneSet := make(map[string]bool, len(tasks))
 	recordByID := make(map[string]*taskRecord, len(records))
 	for _, r := range records {
 		recordByID[r.task.TaskID] = r
 	}
 
-	// firstRspSeen tracks whether we've already captured the first-response tick.
+	doneSet := make(map[string]bool, len(tasks))
 	firstRspSeen := make(map[string]bool, len(tasks))
+
+	tick := 0
+	nextSubmitIdx := 0
+	pending := len(tasks)
 
 	for pending > 0 {
 		tick++
+
+		// Admit one task every ArrivalIntervalTicks. Tasks that have not yet
+		// arrived are invisible to the scheduler, so a short task arriving after
+		// a heavy one is immediately eligible to preempt it at Q0.
+		if nextSubmitIdx < len(tasks) && tick%cfg.ArrivalIntervalTicks == 0 {
+			r := records[nextSubmitIdx]
+			r.arrivalTick = tick
+			scheduler.SubmitTask(r.task)
+			nextSubmitIdx++
+		}
+
 		scheduler.Tick()
 
 		for _, r := range records {
@@ -175,9 +196,10 @@ func computeMetrics(records []*taskRecord) metrics {
 	}
 }
 
-// PrintBenchmarkReport prints a structured comparison table between two SimResults.
-// Assumes results[0] is the baseline (FIFO) and results[1] is the challenger (MLFQ).
-func PrintBenchmarkReport(results [2]SimResult) {
+// PrintBenchmarkReport renders a structured comparison table to stdout. When
+// cfg.ReportFilepath is non-empty, the identical ASCII output is also persisted
+// to that path, creating or truncating the file as needed.
+func PrintBenchmarkReport(results [2]SimResult, cfg SimConfig) {
 	fifo := results[0]
 	mlfq := results[1]
 
@@ -186,13 +208,23 @@ func PrintBenchmarkReport(results [2]SimResult) {
 	mlfqI := computeMetrics(mlfq.interactive)
 	mlfqH := computeMetrics(mlfq.heavy)
 
+	writers := []io.Writer{os.Stdout}
+	if cfg.ReportFilepath != "" {
+		f, err := os.Create(cfg.ReportFilepath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warn: could not create report file %q: %v\n", cfg.ReportFilepath, err)
+		} else {
+			defer f.Close()
+			writers = append(writers, f)
+		}
+	}
+	out := io.MultiWriter(writers...)
+
+	interLabel := fmt.Sprintf("INTERACTIVE TASKS (tokens %d–%d)", cfg.InteractiveToks[0], cfg.InteractiveToks[1])
+	heavyLabel := fmt.Sprintf("HEAVY BATCH TASKS (tokens %d–%d)", cfg.HeavyToks[0], cfg.HeavyToks[1])
+
 	sep := strings.Repeat("─", 72)
 	hdr := strings.Repeat("═", 72)
-
-	fmt.Println()
-	fmt.Println(hdr)
-	fmt.Printf("  %-38s  %12s  %12s\n", "METRIC", fifo.name, mlfq.name)
-	fmt.Println(hdr)
 
 	printRow := func(label string, a, b float64, unit string) {
 		delta := ""
@@ -204,22 +236,26 @@ func PrintBenchmarkReport(results [2]SimResult) {
 			}
 			delta = fmt.Sprintf("  (%s%.1f%%)", sign, pct)
 		}
-		fmt.Printf("  %-38s  %11.2f%s  %11.2f%s%s\n", label, a, unit, b, unit, delta)
+		fmt.Fprintf(out, "  %-38s  %11.2f%s  %11.2f%s%s\n", label, a, unit, b, unit, delta)
 	}
 
-	fmt.Printf("  %-38s  %12d  %12d\n", "Total Ticks to Drain", fifo.totalTicks, mlfq.totalTicks)
-	fmt.Println(sep)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, hdr)
+	fmt.Fprintf(out, "  %-38s  %12s  %12s\n", "METRIC", fifo.name, mlfq.name)
+	fmt.Fprintln(out, hdr)
+	fmt.Fprintf(out, "  %-38s  %12d  %12d\n", "Total Ticks to Drain", fifo.totalTicks, mlfq.totalTicks)
+	fmt.Fprintln(out, sep)
 
-	fmt.Printf("  %-38s\n", "INTERACTIVE TASKS (tokens 10–50)")
-	fmt.Printf("  %-38s  %12d  %12d\n", "  Count", fifoI.count, mlfqI.count)
+	fmt.Fprintf(out, "  %-38s\n", interLabel)
+	fmt.Fprintf(out, "  %-38s  %12d  %12d\n", "  Count", fifoI.count, mlfqI.count)
 	printRow("  Avg Turnaround Time", fifoI.avgTurnaround, mlfqI.avgTurnaround, "t")
 	printRow("  P99 First-Response Latency", fifoI.p99FirstRspLat, mlfqI.p99FirstRspLat, "t")
-	fmt.Println(sep)
+	fmt.Fprintln(out, sep)
 
-	fmt.Printf("  %-38s\n", "HEAVY BATCH TASKS (tokens 500–1000)")
-	fmt.Printf("  %-38s  %12d  %12d\n", "  Count", fifoH.count, mlfqH.count)
+	fmt.Fprintf(out, "  %-38s\n", heavyLabel)
+	fmt.Fprintf(out, "  %-38s  %12d  %12d\n", "  Count", fifoH.count, mlfqH.count)
 	printRow("  Avg Turnaround Time", fifoH.avgTurnaround, mlfqH.avgTurnaround, "t")
 	printRow("  P99 First-Response Latency", fifoH.p99FirstRspLat, mlfqH.p99FirstRspLat, "t")
-	fmt.Println(hdr)
-	fmt.Println()
+	fmt.Fprintln(out, hdr)
+	fmt.Fprintln(out)
 }
