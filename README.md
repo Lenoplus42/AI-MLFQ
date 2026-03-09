@@ -15,3 +15,11 @@ By implementing a **Multi-Level Feedback Queue (MLFQ)**:
 3. **Latency Isolation:** Interactive agents remain in the top-tier queue, receiving immediate compute resources, while batch-processing agents utilize system idle cycles.
 
 This is an ongoing project building by Lennox, purely for fun.
+
+## Known Theoretical Problems
+At the MVP-oritned Phase 1 of AgentTask simulation phase, our AI-MLFQ does not have huge difference compared to traditional OS MLFQ. So if its just translating UNIX scheduler into Go, why care?
+So, next phase I will bring two new concepts into the project: VRAM & KV Cache.
+- Traditional OS Scheduling (CPU Threads): context switching is fast and cost-free, storing registers and PCs into memory has milisecond level cost.
+- AI Deduction Scheduling (LLM Engine): context switching is extremely expensive. When a model stops generating for a long task, its memory of KV Cache can be up to hundreds of MBs or GBs. If you put that from HBM into DRAM, PCIe gonna take you dozens of miliseconds.
+- AgentTask's Bimodel Workload: unlike OS tasks which are more evenly spread in terms of completion time, AI Agent Task is whether short command like "run the next step", or 10 papers waited to be analyzed.
+Summary: we need something called "Memory-Aware Scheduling".
