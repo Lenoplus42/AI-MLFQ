@@ -9,17 +9,17 @@ import (
 
 func main() {
 	cfg := aischeduler.SimConfig{
-		NumTasks:         10000,
-		InteractiveRatio: 0.80,
+		NumTasks:         5000,
+		InteractiveRatio: 0.85,
 		InteractiveToks:  [2]int{10, 50},
-		HeavyToks:        [2]int{500, 1000},
+		HeavyToks:        [2]int{10000, 30000},
 
-		ArrivalIntervalTicks: 150,
+		ArrivalIntervalTicks: 5,
 
-		MaxKVCacheTokens:          20000,
-		ContextSwitchPenaltyTicks: 2,
+		MaxKVCacheTokens:          200000,
+		ContextSwitchPenaltyTicks: 15,
 
-		ReportFilepath: "benchmark_report/benchmark_report_2.txt",
+		ReportFilepath: "benchmark_report/benchmark_report_h100_disaster.txt",
 	}
 
 	fmt.Println("Booting AIOS MLFQ Benchmark Simulator...")

@@ -38,13 +38,19 @@ const (
 	classHeavy
 )
 
-// taskRecord pairs an AgentTask with its tick-based timing observations.
+// taskRecord pairs an AgentTask with its tick-based timing observations and
+// any simulator-level eviction state. These fields are intentionally kept out
+// of AgentTask to avoid polluting the core scheduling types.
 type taskRecord struct {
 	task         *AgentTask
 	class        taskClass
 	arrivalTick  int
 	firstRspTick int
 	doneTick     int
+
+	// VRAM eviction state — managed exclusively by the simulator loop.
+	isEvicted        bool
+	penaltyRemaining int // ticks until PCIe page-in completes
 }
 
 // SimResult holds the raw observations from a single simulation run.
@@ -104,6 +110,12 @@ func classifyTask(t *AgentTask, cfg SimConfig) taskClass {
 // RunSimulation drives the scheduler until every submitted task reaches
 // StateDone, feeding tasks one-at-a-time at cfg.ArrivalIntervalTicks cadence
 // to replicate realistic Poisson-ish traffic rather than a thundering herd.
+//
+// When cfg.MaxKVCacheTokens > 0 the simulator enforces a VRAM budget: after
+// each scheduler tick it sums the KV-cache footprint (TokensProcessed) of all
+// active tasks and, if the budget is breached, evicts the lowest-priority tasks
+// first. Each evicted task incurs cfg.ContextSwitchPenaltyTicks of PCIe I/O
+// delay before it is eligible to re-enter the scheduler.
 func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cfg SimConfig) SimResult {
 	records := make([]*taskRecord, len(tasks))
 	for i, t := range tasks {
@@ -128,9 +140,10 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 	for pending > 0 {
 		tick++
 
-		// Admit one task every ArrivalIntervalTicks. Tasks that have not yet
-		// arrived are invisible to the scheduler, so a short task arriving after
-		// a heavy one is immediately eligible to preempt it at Q0.
+		// Phase 1 — Admit: one new task enters every ArrivalIntervalTicks.
+		// Tasks that have not yet arrived are invisible to the scheduler, so a
+		// short task that arrives while a heavy task is running immediately
+		// becomes the highest-priority work item at Q0.
 		if nextSubmitIdx < len(tasks) && tick%cfg.ArrivalIntervalTicks == 0 {
 			r := records[nextSubmitIdx]
 			r.arrivalTick = tick
@@ -138,8 +151,26 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 			nextSubmitIdx++
 		}
 
+		// Phase 2 — Page-In: count down PCIe transfer timers. Tasks whose
+		// penalty expires are re-enqueued before scheduler.Tick() runs, so they
+		// are eligible to be scheduled in this very tick.
+		for _, r := range records {
+			if !r.isEvicted {
+				continue
+			}
+			if r.penaltyRemaining > 0 {
+				r.penaltyRemaining--
+			} else {
+				// penaltyRemaining == 0: page-in complete.
+				r.isEvicted = false
+				scheduler.ReEnqueue(r.task)
+			}
+		}
+
+		// Phase 3 — Schedule: advance the simulation by one timer interrupt.
 		scheduler.Tick()
 
+		// Phase 4 — Observe: capture first-response and completion ticks.
 		for _, r := range records {
 			t := r.task
 			if !firstRspSeen[t.TaskID] && !t.FirstResponse.IsZero() {
@@ -151,6 +182,51 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 				doneSet[t.TaskID] = true
 				pending--
 			}
+		}
+
+		// Phase 5 — VRAM eviction: enforce the KV-cache budget.
+		// Runs after observation so tasks that completed this tick are already
+		// StateDone and excluded from both the footprint sum and victim pool.
+		if cfg.MaxKVCacheTokens <= 0 {
+			continue
+		}
+
+		vramUsed := 0
+		for _, r := range records {
+			if r.task.TokensProcessed > 0 && !r.isEvicted && r.task.State != StateDone {
+				vramUsed += r.task.TokensProcessed
+			}
+		}
+
+		if vramUsed <= cfg.MaxKVCacheTokens {
+			continue
+		}
+
+		// Build the eviction candidate list: active tasks sitting in a queue,
+		// sorted by PriorityLevel descending so the lowest-priority work (the
+		// largest level number) is evicted first. Q0 tasks are touched only when
+		// no lower-priority alternatives remain.
+		candidates := make([]*taskRecord, 0)
+		for _, r := range records {
+			if !r.isEvicted && r.task.State == StateReady && r.task.TokensProcessed > 0 {
+				candidates = append(candidates, r)
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].task.PriorityLevel > candidates[j].task.PriorityLevel
+		})
+
+		for _, victim := range candidates {
+			if vramUsed <= cfg.MaxKVCacheTokens {
+				break
+			}
+			if !scheduler.Evict(victim.task.TaskID) {
+				continue
+			}
+			vramUsed -= victim.task.TokensProcessed
+			victim.isEvicted = true
+			victim.penaltyRemaining = cfg.ContextSwitchPenaltyTicks
+			victim.task.State = StateBlocked
 		}
 	}
 

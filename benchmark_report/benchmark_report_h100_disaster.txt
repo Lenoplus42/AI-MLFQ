@@ -2,16 +2,16 @@
 ════════════════════════════════════════════════════════════════════════
   METRIC                                          FIFO          MLFQ
 ════════════════════════════════════════════════════════════════════════
-  Total Ticks to Drain                         1744508       1744508
+  Total Ticks to Drain                        14954224      14954224
 ────────────────────────────────────────────────────────────────────────
   INTERACTIVE TASKS (tokens 10–50)      
-    Count                                         8000          8000
-    Avg Turnaround Time                     112194.56t        28.90t  (-100.0%)
-    P99 First-Response Latency              245703.00t         0.00t  (-100.0%)
+    Count                                         4250          4250
+    Avg Turnaround Time                    7144425.36t     96281.74t  (-98.7%)
+    P99 First-Response Latency            14727545.00t     24730.00t  (-99.8%)
 ────────────────────────────────────────────────────────────────────────
-  HEAVY BATCH TASKS (tokens 500–1000)   
-    Count                                         2000          2000
-    Avg Turnaround Time                     114730.61t    156142.10t  (+36.1%)
-    P99 First-Response Latency              244973.00t         0.00t  (-100.0%)
+  HEAVY BATCH TASKS (tokens 10000–30000)
+    Count                                          750           750
+    Avg Turnaround Time                    7377582.64t   7462272.47t  (+1.1%)
+    P99 First-Response Latency            14740188.00t     24850.00t  (-99.8%)
 ════════════════════════════════════════════════════════════════════════
 

@@ -36,6 +36,20 @@ func (q *MLFQQueue) Dequeue() *AgentTask {
 	return task
 }
 
+// Remove finds and removes the first task matching taskID. Returns true if a
+// task was found and excised, false if the ID was not present in this level.
+func (q *MLFQQueue) Remove(taskID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, t := range q.tasks {
+		if t.TaskID == taskID {
+			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 // Concurrency Safe method that returns the number of tasks currently in this queue.
 func (q *MLFQQueue) Len() int {
 	q.mu.Lock()

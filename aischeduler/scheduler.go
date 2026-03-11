@@ -90,6 +90,26 @@ func (s *MLFQScheduler) Tick() {
 	currentQueue.EnqueueFront(task)
 }
 
+// Evict removes a specific task from whichever queue currently holds it.
+// Returns true if the task was found and removed. The caller is responsible
+// for updating the task's State and tracking the eviction penalty.
+func (s *MLFQScheduler) Evict(taskID string) bool {
+	for _, q := range s.queues {
+		if q.Remove(taskID) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReEnqueue places a previously evicted task back into the queue corresponding
+// to its current PriorityLevel, preserving any demotion that occurred before
+// the eviction. Unlike SubmitTask, it does not reset the task to Q0.
+func (s *MLFQScheduler) ReEnqueue(task *AgentTask) {
+	task.State = StateReady
+	s.queues[task.PriorityLevel].Enqueue(task)
+}
+
 // PrintStatus logs the current depth of every queue level.
 // For debugging and observing scheduler behaviour under load.
 func (s *MLFQScheduler) PrintStatus() {
