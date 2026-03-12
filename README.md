@@ -37,7 +37,7 @@ AI-MLFQ brings OS-level CPU scheduling primitives to LLM resource management. As
 * **Memory-Aware Eviction:** Unlike traditional OS threads where context switching is cheap (SRAM $\rightarrow$ HBM), LLM context switching requires massive PCIe transfers (HBM $\leftrightarrow$ Host DRAM). Our simulator actively tracks active KV Cache tokens and enforces PCIe I/O penalties when VRAM bounds are breached.
 * **Compute-I/O Overlap:** While evicted tasks serve their PCIe penalty, the GPU's Streaming Multiprocessors (SMs) immediately execute the next interactive task, keeping utilization at 100%.
 
-> **📖 Deep Dive:** For a rigorous breakdown of how our variables map to real-world hardware (Tick duration, H100 VRAM limits, and PCIe bandwidth maths), read the [ARCHITECTURE.md](ARCHITECTURE.md).
+> **📖 Deep Dive:** For a rigorous breakdown of how our variables map to real-world hardware (Tick duration, H100 VRAM limits, and PCIe bandwidth maths), read the [DESIGN.md](DESIGN.md).
 
 ## 🛠️ Usage
 To run the simulator and generate the benchmark report yourself:
