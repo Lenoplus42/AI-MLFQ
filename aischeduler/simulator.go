@@ -14,7 +14,7 @@ import (
 // simulation run. Pass it by value; zero values are intentionally invalid so
 // callers must be explicit.
 type SimConfig struct {
-	NumTasks    int
+	NumTasks         int
 	InteractiveRatio float64
 	InteractiveToks  [2]int // [min, max] tokens for interactive tasks
 	HeavyToks        [2]int // [min, max] tokens for heavy-batch tasks
@@ -22,7 +22,7 @@ type SimConfig struct {
 	ArrivalIntervalTicks int // ticks between successive task arrivals
 
 	// Physical GPU constraints — scaffolding for the VRAM eviction layer.
-	MaxKVCacheTokens         int // total VRAM capacity expressed in KV-cache tokens
+	MaxKVCacheTokens          int // total VRAM capacity expressed in KV-cache tokens
 	ContextSwitchPenaltyTicks int // PCIe page-out + page-in cost when evicting a task
 
 	// If non-empty, the benchmark report is written to this path in addition

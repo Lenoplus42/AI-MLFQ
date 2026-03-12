@@ -6,7 +6,7 @@ import (
 )
 
 // MLFQScheduler is a fully dynamic, configurable multi-level feedback queue
-// scheduler for AI agents. 
+// scheduler for AI agents.
 type MLFQScheduler struct {
 	queues []*MLFQQueue
 }
@@ -75,7 +75,7 @@ func (s *MLFQScheduler) Tick() {
 	isFiniteQuantum := currentQueue.Quantum > 0
 	if isFiniteQuantum && task.TimeQuantumUsed >= currentQueue.Quantum {
 		task.TimeQuantumUsed = 0
-		if task.PriorityLevel < len(s.queues) - 1 {
+		if task.PriorityLevel < len(s.queues)-1 {
 			task.PriorityLevel++
 		}
 		task.State = StateReady

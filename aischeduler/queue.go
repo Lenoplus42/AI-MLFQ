@@ -4,11 +4,11 @@ package aischeduler
 // Safe for concurrent use by multiple goroutines.
 func (q *MLFQQueue) Enqueue(task *AgentTask) {
 	// Note: We use a simple Mutex + Slice here.
-	// A Lock-free RingBuffer would be more efficient for high-throughput, but 
-	// at, for example, 10k concurrent agents, the bottleneck could be LLM network I/O, 
+	// A Lock-free RingBuffer would be more efficient for high-throughput, but
+	// at, for example, 10k concurrent agents, the bottleneck could be LLM network I/O,
 	// not lock contention. Avoid premature optimization here, will profile later and see if we need to change.
 	q.mu.Lock()
-	defer q.mu.Unlock() // Auto unlocks when function exits
+	defer q.mu.Unlock()             // Auto unlocks when function exits
 	q.tasks = append(q.tasks, task) // "In MLFQ... Job starts in highest priority queue." -- CS162
 }
 
