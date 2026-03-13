@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIOS MLFQ Simulator Replay</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d0d0f;
+      --surface:   #141418;
+      --border:    #2a2a35;
+      --green:     #00ff88;
+      --blue:      #00c8ff;
+      --amber:     #ffaa00;
+      --purple:    #b57bee;
+      --red:       #ff4455;
+      --text:      #d0d0e0;
+      --muted:     #606070;
+      --glow-g:    rgba(0,255,136,0.18);
+      --glow-b:    rgba(0,200,255,0.18);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Courier New', Courier, monospace;
+      overflow-x: hidden;
+    }
+
+    /* subtle CRT scanline overlay */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0,0,0,0.06) 3px,
+        rgba(0,0,0,0.06) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px 28px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* ── header ── */
+    header { text-align: center; }
+
+    h1 {
+      font-size: clamp(1.2rem, 2.5vw, 1.8rem);
+      letter-spacing: 0.18em;
+      color: var(--green);
+      text-shadow: 0 0 12px var(--green), 0 0 28px rgba(0,255,136,0.35);
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      margin-top: 6px;
+      font-size: 0.75rem;
+      color: var(--muted);
+      letter-spacing: 0.14em;
+    }
+
+    /* ── status / error panel ── */
+    #status {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      letter-spacing: 0.08em;
+    }
+
+    #status .loader {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #status .error-box {
+      background: rgba(255,68,85,0.08);
+      border: 1px solid var(--red);
+      border-radius: 6px;
+      padding: 24px 32px;
+      display: inline-block;
+      text-align: left;
+      max-width: 560px;
+    }
+
+    #status .error-box p { margin-bottom: 10px; line-height: 1.6; }
+    #status .error-box p:last-child { margin-bottom: 0; }
+    #status .error-box code {
+      background: rgba(255,255,255,0.06);
+      padding: 2px 7px;
+      border-radius: 3px;
+      color: var(--amber);
+      font-size: 0.85rem;
+    }
+
+    /* ── main content (hidden until data loads) ── */
+    #main { display: none; flex-direction: column; gap: 16px; }
+
+    /* ── chart wrapper ── */
+    .chart-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px;
+      overflow: hidden;
+    }
+
+    #chart { width: 100%; height: min(62vh, 560px); }
+
+    /* ── stats bar ── */
+    .stats {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      flex: 1;
+      min-width: 110px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .stat .label {
+      font-size: 0.65rem;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .stat .value {
+      font-size: 1.15rem;
+      font-weight: bold;
+      letter-spacing: 0.05em;
+    }
+
+    .stat.tick   .value { color: var(--text); }
+    .stat.vram   { border-color: rgba(0,200,255,0.35); }
+    .stat.vram   .value { color: var(--blue); text-shadow: 0 0 8px var(--glow-b); }
+    .stat.q0     { border-color: rgba(0,255,136,0.3); }
+    .stat.q0     .value { color: var(--green); }
+    .stat.q1     { border-color: rgba(255,170,0,0.3); }
+    .stat.q1     .value { color: var(--amber); }
+    .stat.q2     { border-color: rgba(181,123,238,0.3); }
+    .stat.q2     .value { color: var(--purple); }
+    .stat.evict  { border-color: rgba(255,68,85,0.3); }
+    .stat.evict  .value { color: var(--red); }
+
+    /* ── controls ── */
+    .controls {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .tick-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: nowrap;
+      min-width: 58px;
+      text-align: right;
+    }
+
+    .tick-label.end { text-align: left; }
+
+    input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 5px;
+      border-radius: 3px;
+      background: var(--border);
+      outline: none;
+      cursor: pointer;
+      accent-color: var(--green);
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--green);
+      cursor: pointer;
+      box-shadow: 0 0 8px var(--green), 0 0 16px rgba(0,255,136,0.4);
+      transition: box-shadow 0.15s;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      box-shadow: 0 0 12px var(--green), 0 0 24px rgba(0,255,136,0.6);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--green);
+      cursor: pointer;
+      border: none;
+      box-shadow: 0 0 8px var(--green);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    button {
+      font-family: inherit;
+      font-size: 0.8rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 9px 22px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    #playBtn {
+      background: transparent;
+      color: var(--green);
+      border: 1px solid var(--green);
+      box-shadow: 0 0 8px rgba(0,255,136,0.2) inset;
+    }
+
+    #playBtn:hover, #playBtn.active {
+      background: rgba(0,255,136,0.12);
+      box-shadow: 0 0 12px rgba(0,255,136,0.4) inset, 0 0 12px rgba(0,255,136,0.3);
+    }
+
+    #resetBtn {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    #resetBtn:hover {
+      color: var(--text);
+      border-color: var(--text);
+    }
+
+    .speed-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-left: auto;
+    }
+
+    #speedSel {
+      font-family: inherit;
+      font-size: 0.75rem;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    footer {
+      text-align: center;
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      padding-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>⟨ AIOS MLFQ SIMULATOR REPLAY ⟩</h1>
+      <p class="subtitle">Discrete Event Simulation — KV Cache &amp; Queue Depth Trace Visualizer</p>
+    </header>
+
+    <div id="status">
+      <span class="loader"></span> Loading trace.json&hellip;
+    </div>
+
+    <div id="main">
+      <div class="chart-wrap">
+        <div id="chart"></div>
+      </div>
+
+      <div class="stats">
+        <div class="stat tick">
+          <span class="label">Current Tick</span>
+          <span class="value" id="s-tick">—</span>
+        </div>
+        <div class="stat vram">
+          <span class="label">VRAM Used</span>
+          <span class="value" id="s-vram">—</span>
+        </div>
+        <div class="stat q0">
+          <span class="label">Q0 Depth</span>
+          <span class="value" id="s-q0">—</span>
+        </div>
+        <div class="stat q1">
+          <span class="label">Q1 Depth</span>
+          <span class="value" id="s-q1">—</span>
+        </div>
+        <div class="stat q2">
+          <span class="label">Q2 Depth</span>
+          <span class="value" id="s-q2">—</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="slider-row">
+          <span class="tick-label" id="tick-cur">0</span>
+          <input type="range" id="slider" min="0" max="0" value="0" />
+          <span class="tick-label end" id="tick-max">0</span>
+        </div>
+        <div class="btn-row">
+          <button id="playBtn">▶&nbsp; Play</button>
+          <button id="resetBtn">⟳&nbsp; Reset</button>
+          <span class="speed-label">Speed&nbsp;</span>
+          <select id="speedSel">
+            <option value="80">0.5×</option>
+            <option value="40" selected>1×</option>
+            <option value="20">2×</option>
+            <option value="8">5×</option>
+            <option value="1">Max</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      Serve this directory with: &nbsp;<code style="color:var(--amber)">python -m http.server 8080</code>&nbsp; then open
+      <code style="color:var(--amber)">http://localhost:8080</code>
+    </footer>
+  </div>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ── DOM refs ────────────────────────────────────────────────────────────
+    const statusEl  = document.getElementById('status');
+    const mainEl    = document.getElementById('main');
+    const chartEl   = document.getElementById('chart');
+    const slider    = document.getElementById('slider');
+    const playBtn   = document.getElementById('playBtn');
+    const resetBtn  = document.getElementById('resetBtn');
+    const speedSel  = document.getElementById('speedSel');
+    const sTick     = document.getElementById('s-tick');
+    const sVram     = document.getElementById('s-vram');
+    const sQ0       = document.getElementById('s-q0');
+    const sQ1       = document.getElementById('s-q1');
+    const sQ2       = document.getElementById('s-q2');
+    const tickCur   = document.getElementById('tick-cur');
+    const tickMax   = document.getElementById('tick-max');
+
+    // ── state ────────────────────────────────────────────────────────────────
+    let snapshots = [];
+    let maxKV     = 0;
+    let curIdx    = 0;
+    let playing   = false;
+    let rafId     = null;
+    let lastTime  = 0;
+    let chart     = null;
+
+    // Pre-built data arrays for fast slicing (avoids rebuilding on every frame)
+    let vramData = [];
+    let q0Data   = [];
+    let q1Data   = [];
+    let q2Data   = [];
+
+    // ── utilities ────────────────────────────────────────────────────────────
+    const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + ' M'
+                   : n >= 1e3 ? (n / 1e3).toFixed(1) + ' K'
+                   : String(n);
+
+    const fmtTick = n => n.toLocaleString();
+
+    // ── ECharts init ─────────────────────────────────────────────────────────
+    function buildChart(lastTick) {
+      chart = echarts.init(chartEl, null, { renderer: 'canvas' });
+
+      const limitLine = maxKV > 0 ? [{
+        yAxis: maxKV,
+        name: 'VRAM LIMIT',
+        lineStyle: { color: '#ff4455', type: 'dashed', width: 1.5 },
+        label: {
+          formatter: 'VRAM LIMIT  ' + fmt(maxKV),
+          color: '#ff4455',
+          fontSize: 11,
+          position: 'insideEndTop',
+        },
+      }] : [];
+
+      const opt = {
+        backgroundColor: 'transparent',
+        animation: false,
+        grid: { left: 88, right: 72, top: 52, bottom: 48 },
+
+        legend: {
+          data: ['VRAM Usage', 'Q0  (high-priority)', 'Q1  (mid)', 'Q2  (batch FCFS)'],
+          textStyle: { color: '#888', fontFamily: 'Courier New', fontSize: 11 },
+          top: 8,
+          itemGap: 20,
+        },
+
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: 'rgba(14,14,18,0.92)',
+          borderColor: '#2a2a35',
+          borderWidth: 1,
+          textStyle: { color: '#d0d0e0', fontFamily: 'Courier New', fontSize: 11.5 },
+          formatter(params) {
+            if (!params.length) return '';
+            const tick = params[0].value[0];
+            let html = `<div style="color:#606070;margin-bottom:6px">Tick&nbsp;<b style="color:#d0d0e0">${fmtTick(tick)}</b></div>`;
+            params.forEach(p => {
+              const dot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};margin-right:6px"></span>`;
+              html += `<div style="padding:2px 0">${dot}${p.seriesName}&nbsp;&nbsp;<b>${fmt(p.value[1])}</b></div>`;
+            });
+            return html;
+          },
+        },
+
+        xAxis: {
+          type: 'value',
+          name: 'Simulation Tick',
+          nameLocation: 'middle',
+          nameGap: 32,
+          nameTextStyle: { color: '#555', fontFamily: 'Courier New', fontSize: 11 },
+          min: 0,
+          max: lastTick,
+          axisLine:  { lineStyle: { color: '#2a2a35' } },
+          splitLine: { lineStyle: { color: '#1c1c22' } },
+          axisLabel: { color: '#555', fontFamily: 'Courier New', fontSize: 10,
+                       formatter: v => v >= 1e3 ? (v / 1e3).toFixed(0) + 'K' : v },
+          axisTick:  { lineStyle: { color: '#2a2a35' } },
+        },
+
+        yAxis: [
+          {
+            // left — VRAM tokens
+            type: 'value',
+            name: 'KV Cache Tokens',
+            nameLocation: 'middle',
+            nameGap: 62,
+            nameTextStyle: { color: '#00c8ff', fontFamily: 'Courier New', fontSize: 11 },
+            axisLine:  { show: true, lineStyle: { color: '#00c8ff', opacity: 0.3 } },
+            splitLine: { lineStyle: { color: '#1c1c22' } },
+            axisLabel: { color: '#555', fontFamily: 'Courier New', fontSize: 10,
+                         formatter: v => fmt(v) },
+            axisTick:  { lineStyle: { color: '#2a2a35' } },
+          },
+          {
+            // right — queue depth
+            type: 'value',
+            name: 'Queue Depth',
+            nameLocation: 'middle',
+            nameGap: 44,
+            nameTextStyle: { color: '#00ff88', fontFamily: 'Courier New', fontSize: 11 },
+            axisLine:  { show: true, lineStyle: { color: '#00ff88', opacity: 0.3 } },
+            splitLine: { show: false },
+            axisLabel: { color: '#555', fontFamily: 'Courier New', fontSize: 10 },
+            axisTick:  { lineStyle: { color: '#2a2a35' } },
+          },
+        ],
+
+        series: [
+          {
+            name: 'VRAM Usage',
+            type: 'line',
+            yAxisIndex: 0,
+            data: [],
+            showSymbol: false,
+            lineStyle: { color: '#00c8ff', width: 2 },
+            itemStyle: { color: '#00c8ff' },
+            areaStyle: {
+              color: {
+                type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [
+                  { offset: 0, color: 'rgba(0,200,255,0.28)' },
+                  { offset: 1, color: 'rgba(0,200,255,0.02)' },
+                ],
+              },
+            },
+            markLine: { silent: true, symbol: 'none', data: limitLine },
+          },
+          {
+            name: 'Q0  (high-priority)',
+            type: 'line',
+            yAxisIndex: 1,
+            stack: 'queues',
+            data: [],
+            showSymbol: false,
+            smooth: 0.25,
+            lineStyle: { color: '#00ff88', width: 1.5 },
+            itemStyle: { color: '#00ff88' },
+            areaStyle: { color: 'rgba(0,255,136,0.35)' },
+          },
+          {
+            name: 'Q1  (mid)',
+            type: 'line',
+            yAxisIndex: 1,
+            stack: 'queues',
+            data: [],
+            showSymbol: false,
+            smooth: 0.25,
+            lineStyle: { color: '#ffaa00', width: 1.5 },
+            itemStyle: { color: '#ffaa00' },
+            areaStyle: { color: 'rgba(255,170,0,0.3)' },
+          },
+          {
+            name: 'Q2  (batch FCFS)',
+            type: 'line',
+            yAxisIndex: 1,
+            stack: 'queues',
+            data: [],
+            showSymbol: false,
+            smooth: 0.25,
+            lineStyle: { color: '#b57bee', width: 1.5 },
+            itemStyle: { color: '#b57bee' },
+            areaStyle: { color: 'rgba(181,123,238,0.25)' },
+          },
+        ],
+      };
+
+      chart.setOption(opt);
+      window.addEventListener('resize', () => chart.resize());
+    }
+
+    // ── chart update (called on every slider change / play frame) ────────────
+    function renderFrame(idx) {
+      const end = idx + 1;
+      chart.setOption({
+        series: [
+          { data: vramData.slice(0, end) },
+          { data: q0Data.slice(0, end)   },
+          { data: q1Data.slice(0, end)   },
+          { data: q2Data.slice(0, end)   },
+        ],
+      });
+
+      const s = snapshots[idx];
+      sTick.textContent  = fmtTick(s.tick);
+      sVram.textContent  = fmt(s.vramUsage);
+      sQ0.textContent    = s.q0Len;
+      sQ1.textContent    = s.q1Len;
+      sQ2.textContent    = s.q2Len;
+      tickCur.textContent = fmtTick(s.tick);
+    }
+
+    // ── playback loop (rAF-based with configurable interval) ─────────────────
+    function step(ts) {
+      if (!playing) return;
+      const interval = parseInt(speedSel.value, 10);
+      if (ts - lastTime >= interval) {
+        lastTime = ts;
+        curIdx = Math.min(curIdx + 1, snapshots.length - 1);
+        slider.value = curIdx;
+        renderFrame(curIdx);
+        if (curIdx >= snapshots.length - 1) {
+          stopPlay();
+          return;
+        }
+      }
+      rafId = requestAnimationFrame(step);
+    }
+
+    function startPlay() {
+      if (curIdx >= snapshots.length - 1) {
+        curIdx = 0;
+        slider.value = 0;
+      }
+      playing = true;
+      playBtn.textContent = '⏸  Pause';
+      playBtn.classList.add('active');
+      lastTime = performance.now();
+      rafId = requestAnimationFrame(step);
+    }
+
+    function stopPlay() {
+      playing = false;
+      if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+      playBtn.textContent = '▶  Play';
+      playBtn.classList.remove('active');
+    }
+
+    // ── control wiring ────────────────────────────────────────────────────────
+    slider.addEventListener('input', () => {
+      curIdx = parseInt(slider.value, 10);
+      renderFrame(curIdx);
+    });
+
+    playBtn.addEventListener('click', () => {
+      if (playing) stopPlay(); else startPlay();
+    });
+
+    resetBtn.addEventListener('click', () => {
+      stopPlay();
+      curIdx = 0;
+      slider.value = 0;
+      renderFrame(0);
+    });
+
+    // ── data loading ─────────────────────────────────────────────────────────
+    fetch('trace.json')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status} — ${r.statusText}`);
+        return r.json();
+      })
+      .then(data => {
+        snapshots = data.snapshots || [];
+        maxKV     = data.maxKVCacheTokens || 0;
+
+        if (!snapshots.length) {
+          throw new Error('trace.json contains no snapshots. Run the simulator first.');
+        }
+
+        // Pre-build flat [tick, value] arrays once for O(1) slice on every frame.
+        vramData = snapshots.map(s => [s.tick, s.vramUsage]);
+        q0Data   = snapshots.map(s => [s.tick, s.q0Len]);
+        q1Data   = snapshots.map(s => [s.tick, s.q1Len]);
+        q2Data   = snapshots.map(s => [s.tick, s.q2Len]);
+
+        const lastTick = snapshots[snapshots.length - 1].tick;
+
+        statusEl.style.display = 'none';
+        mainEl.style.display   = 'flex';
+
+        buildChart(lastTick);
+
+        slider.max   = snapshots.length - 1;
+        slider.value = 0;
+        tickMax.textContent = fmtTick(lastTick);
+
+        renderFrame(0);
+      })
+      .catch(err => {
+        statusEl.innerHTML = `
+          <div class="error-box">
+            <p style="color:var(--red);font-size:1rem;margin-bottom:14px">⚠&nbsp; Could not load trace.json</p>
+            <p>Run the Go simulator first:</p>
+            <p><code>go run .</code></p>
+            <p>Then serve the <code>web/</code> directory over HTTP:</p>
+            <p><code>python -m http.server 8080 --directory web</code></p>
+            <p>And open <code>http://localhost:8080</code> in your browser.</p>
+            <p style="margin-top:14px;color:var(--muted);font-size:0.8rem">
+              Note: <code>fetch()</code> is blocked by browsers when opening via <code>file://</code>.
+              A local HTTP server is required.
+            </p>
+            <p style="margin-top:10px;color:var(--red);font-size:0.8rem">Error: ${err.message}</p>
+          </div>`;
+      });
+  }());
+  </script>
+</body>
+</html>

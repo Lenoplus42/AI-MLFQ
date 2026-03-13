@@ -37,6 +37,11 @@ type SimConfig struct {
 	MaxKVCacheTokens          int // total VRAM budget expressed in KV-cache tokens
 	ContextSwitchPenaltyTicks int // PCIe page-out + page-in cost when evicting a task
 
+	// If non-empty, a downsampled replay trace is written to this path after
+	// the simulation completes. Intended for the MLFQ run only; leave empty
+	// for the FIFO baseline to avoid redundant I/O.
+	TraceFilepath string
+
 	// If non-empty, the benchmark report is written to this path in addition
 	// to being printed to stdout.
 	ReportFilepath string
@@ -154,6 +159,7 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 	tick := 0
 	nextSubmitIdx := 0
 	pending := len(tasks)
+	var snapshots []TraceSnapshot
 
 	for pending > 0 {
 		tick++
@@ -206,13 +212,10 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 			}
 		}
 
-		// Phase 5 — VRAM eviction: enforce the KV-cache budget.
-		// Runs after observation so tasks that completed this tick are already
-		// StateDone and excluded from both the footprint sum and victim pool.
-		if cfg.MaxKVCacheTokens <= 0 {
-			continue
-		}
-
+		// Phase 5 — VRAM accounting and conditional eviction.
+		// vramUsed is always computed so the trace logger has an accurate reading
+		// even when no eviction budget is configured. StateDone tasks are already
+		// excluded (Phase 4 ran first); evicted tasks are excluded via isEvicted.
 		vramUsed := 0
 		for _, r := range records {
 			if r.task.TotalKVTokens() > 0 && !r.isEvicted && r.task.State != StateDone {
@@ -220,35 +223,57 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 			}
 		}
 
-		if vramUsed <= cfg.MaxKVCacheTokens {
-			continue
+		if cfg.MaxKVCacheTokens > 0 && vramUsed > cfg.MaxKVCacheTokens {
+			// Build the eviction candidate list: StateReady tasks that have a
+			// non-zero KV footprint, sorted by PriorityLevel descending so the
+			// lowest-priority work is sacrificed first. Q0 tasks are only
+			// touched when no lower-priority alternatives remain.
+			candidates := make([]*taskRecord, 0, len(records))
+			for _, r := range records {
+				if !r.isEvicted && r.task.State == StateReady && r.task.TotalKVTokens() > 0 {
+					candidates = append(candidates, r)
+				}
+			}
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].task.PriorityLevel > candidates[j].task.PriorityLevel
+			})
+
+			for _, victim := range candidates {
+				if vramUsed <= cfg.MaxKVCacheTokens {
+					break
+				}
+				if !scheduler.Evict(victim.task.TaskID) {
+					continue
+				}
+				// Subtract before marking StateBlocked so TotalKVTokens() still
+				// reads the live prefill+decode counters (unchanged by eviction).
+				vramUsed -= victim.task.TotalKVTokens()
+				victim.isEvicted = true
+				victim.penaltyRemaining = cfg.ContextSwitchPenaltyTicks
+				victim.task.State = StateBlocked
+			}
 		}
 
-		// Build the eviction candidate list: active tasks sitting in a queue,
-		// sorted by PriorityLevel descending so the lowest-priority work (the
-		// largest level number) is evicted first. Q0 tasks are touched only when
-		// no lower-priority alternatives remain.
-		candidates := make([]*taskRecord, 0)
-		for _, r := range records {
-			if !r.isEvicted && r.task.State == StateReady && r.task.TotalKVTokens() > 0 {
-				candidates = append(candidates, r)
-			}
+		// Snapshot is taken AFTER the eviction block so vramUsed reflects the
+		// post-eviction footprint. Recording the pre-eviction peak would make
+		// the trace appear to blow past MaxKVCacheTokens on every pressure tick,
+		// obscuring whether the budget is actually being enforced.
+		if cfg.TraceFilepath != "" && tick%traceSnapshotInterval == 0 {
+			ql := scheduler.GetQueueLengths()
+			snapshots = append(snapshots, TraceSnapshot{
+				Tick:      tick,
+				VRAMUsage: vramUsed,
+				Q0Len:     safeIdx(ql, 0),
+				Q1Len:     safeIdx(ql, 1),
+				Q2Len:     safeIdx(ql, 2),
+			})
 		}
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].task.PriorityLevel > candidates[j].task.PriorityLevel
-		})
+	}
 
-		for _, victim := range candidates {
-			if vramUsed <= cfg.MaxKVCacheTokens {
-				break
-			}
-			if !scheduler.Evict(victim.task.TaskID) {
-				continue
-			}
-			vramUsed -= victim.task.TotalKVTokens()
-			victim.isEvicted = true
-			victim.penaltyRemaining = cfg.ContextSwitchPenaltyTicks
-			victim.task.State = StateBlocked
+	if cfg.TraceFilepath != "" && len(snapshots) > 0 {
+		tf := TraceFile{MaxKVCacheTokens: cfg.MaxKVCacheTokens, Snapshots: snapshots}
+		if err := writeTrace(tf, cfg.TraceFilepath); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: could not write trace %q: %v\n", cfg.TraceFilepath, err)
 		}
 	}
 

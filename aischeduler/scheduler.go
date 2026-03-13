@@ -140,6 +140,17 @@ func (s *MLFQScheduler) ReEnqueue(task *AgentTask) {
 	s.queues[task.PriorityLevel].Enqueue(task)
 }
 
+// GetQueueLengths returns the number of tasks waiting in each queue level,
+// ordered from highest to lowest priority. Safe to call between Tick()
+// invocations; acquires each queue's lock independently.
+func (s *MLFQScheduler) GetQueueLengths() []int {
+	lengths := make([]int, len(s.queues))
+	for i, q := range s.queues {
+		lengths[i] = q.Len()
+	}
+	return lengths
+}
+
 // PrintStatus logs the current depth of every queue level.
 func (s *MLFQScheduler) PrintStatus() {
 	fmt.Println("=== MLFQ Status ===")
