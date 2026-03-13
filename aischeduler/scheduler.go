@@ -8,14 +8,17 @@ import (
 // MLFQScheduler is a fully dynamic, configurable multi-level feedback queue
 // scheduler for AI agents.
 type MLFQScheduler struct {
-	queues []*MLFQQueue
+	queues               []*MLFQQueue
+	prefillTokensPerTick int // tokens processed per tick during PhasePrefill (chunked)
+	decodeTokensPerTick  int // tokens generated per tick during PhaseDecode (autoregressive)
 }
 
 // NewMLFQScheduler builds an MLFQ with len(quantums) priority levels.
-// Each entry in quantums sets the time-slice for that level.
-// A quantum of 0 or negative is treated as infinite (pure FCFS), which is
-// the conventional behaviour for the lowest-priority queue.
-func NewMLFQScheduler(quantums []int) *MLFQScheduler {
+// Each entry in quantums sets the time-slice for that level; a negative or zero
+// value is treated as infinite (pure FCFS), which is the conventional behaviour
+// for the lowest-priority tier. The cfg argument supplies the per-tick token
+// rates for both inference phases.
+func NewMLFQScheduler(cfg SimConfig, quantums []int) *MLFQScheduler {
 	queues := make([]*MLFQQueue, len(quantums))
 	for i, q := range quantums {
 		queues[i] = &MLFQQueue{
@@ -24,11 +27,14 @@ func NewMLFQScheduler(quantums []int) *MLFQScheduler {
 			tasks:   make([]*AgentTask, 0),
 		}
 	}
-	return &MLFQScheduler{queues: queues}
+	return &MLFQScheduler{
+		queues:               queues,
+		prefillTokensPerTick: cfg.PrefillTokensPerTick,
+		decodeTokensPerTick:  cfg.DecodeTokensPerTick,
+	}
 }
 
 // SubmitTask enqueues a new task into the highest-priority queue (Level 0).
-// Note: TokensRequired is unknown in real life, but is needed in our benchmark simulator.
 func (s *MLFQScheduler) SubmitTask(task *AgentTask) {
 	task.PriorityLevel = 0
 	task.State = StateReady
@@ -36,11 +42,10 @@ func (s *MLFQScheduler) SubmitTask(task *AgentTask) {
 	s.queues[0].Enqueue(task)
 }
 
-// Tick simulates one timer interrupt in AI-MLFQ. Each call selects one task
-// from the highest non-empty queue, runs it for one time unit, then
-// re-schedules or retires it according to MLFQ policy.
+// Tick simulates one timer interrupt in AI-MLFQ. It selects the highest-priority
+// non-empty queue, runs the head task for one time unit through the appropriate
+// inference phase, then re-schedules or retires it according to MLFQ policy.
 func (s *MLFQScheduler) Tick() {
-	// Scan top-down: highest priority (starting from Level 0) wins resource.
 	var currentQueue *MLFQQueue
 	for _, q := range s.queues {
 		if q.Len() > 0 {
@@ -58,20 +63,19 @@ func (s *MLFQScheduler) Tick() {
 		task.FirstResponse = time.Now()
 	}
 
-	task.TokensProcessed++
 	task.TimeQuantumUsed++
 	task.State = StateRunning
 
-	// Condition A — task has consumed all tokens it needs.
-	if task.TokensProcessed >= task.TokensRequired {
+	done := s.advancePhase(task)
+	if done {
 		task.State = StateDone
 		task.CompletionTime = time.Now()
 		return
 	}
 
-	// Condition B — quantum exhausted: demote one level (FCFS queues are exempt).
-	// Demotion is the core mechanism that prevents tasks from
-	// monopolising high-priority queues.
+	// Condition B — quantum exhausted: demote one level (infinite-quantum queues
+	// are exempt). Demotion is the core mechanism that prevents long-running tasks
+	// from monopolising high-priority queues.
 	isFiniteQuantum := currentQueue.Quantum > 0
 	if isFiniteQuantum && task.TimeQuantumUsed >= currentQueue.Quantum {
 		task.TimeQuantumUsed = 0
@@ -83,11 +87,37 @@ func (s *MLFQScheduler) Tick() {
 		return
 	}
 
-	// Condition C — still has tokens left and quantum is not exhausted; continue
-	// in the same queue. Re-insert at the front so this task holds the CPU for
-	// its full quantum rather than yielding to every other Q0 peer after 1 tick.
+	// Condition C — still has work remaining and quantum is not exhausted.
+	// Re-insert at the front so this task holds the CPU for its full quantum
+	// without yielding to peers after every single tick.
 	task.State = StateReady
 	currentQueue.EnqueueFront(task)
+}
+
+// advancePhase executes one tick of work for the task's current inference phase
+// and returns true when the task has fully completed both phases.
+func (s *MLFQScheduler) advancePhase(task *AgentTask) bool {
+	switch task.Phase {
+	case PhasePrefill:
+		remaining := task.PrefillTokensRequired - task.PrefillTokensProcessed
+		chunk := s.prefillTokensPerTick
+		if remaining < chunk {
+			chunk = remaining
+		}
+		task.PrefillTokensProcessed += chunk
+
+		if task.PrefillTokensProcessed >= task.PrefillTokensRequired {
+			// Cap to avoid over-counting VRAM and transition immediately so
+			// the next tick begins decoding without a wasted scheduling round.
+			task.PrefillTokensProcessed = task.PrefillTokensRequired
+			task.Phase = PhaseDecode
+		}
+		return false
+
+	default: // PhaseDecode
+		task.DecodeTokensProcessed += s.decodeTokensPerTick
+		return task.DecodeTokensProcessed >= task.DecodeTokensRequired
+	}
 }
 
 // Evict removes a specific task from whichever queue currently holds it.
@@ -111,7 +141,6 @@ func (s *MLFQScheduler) ReEnqueue(task *AgentTask) {
 }
 
 // PrintStatus logs the current depth of every queue level.
-// For debugging and observing scheduler behaviour under load.
 func (s *MLFQScheduler) PrintStatus() {
 	fmt.Println("=== MLFQ Status ===")
 	for _, q := range s.queues {
@@ -119,7 +148,7 @@ func (s *MLFQScheduler) PrintStatus() {
 		if q.Quantum <= 0 {
 			label = fmt.Sprintf("Q%d (FCFS)", q.Level)
 		}
-		fmt.Printf("  %-20s tasks: %d\n", label, q.Len()) // Nice little formatting trick to align the text.
+		fmt.Printf("  %-20s tasks: %d\n", label, q.Len())
 	}
 	fmt.Println("===================")
 }

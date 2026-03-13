@@ -3,6 +3,7 @@ package aischeduler
 import (
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -16,13 +17,24 @@ import (
 type SimConfig struct {
 	NumTasks         int
 	InteractiveRatio float64
-	InteractiveToks  [2]int // [min, max] tokens for interactive tasks
-	HeavyToks        [2]int // [min, max] tokens for heavy-batch tasks
+
+	// Per-class token ranges for each inference phase.
+	InteractivePrefillToks [2]int // [min, max] prompt tokens for interactive tasks
+	InteractiveDecodeToks  [2]int // [min, max] output tokens for interactive tasks
+	HeavyPrefillToks       [2]int // [min, max] prompt tokens for heavy-batch tasks
+	HeavyDecodeToks        [2]int // [min, max] output tokens for heavy-batch tasks
+
+	// Structural tick-rate constants for each inference phase.
+	// PrefillTokensPerTick models the parallelism of the attention kernel over the
+	// full prompt (chunked prefill). DecodeTokensPerTick models autoregressive
+	// single-token generation, which is always 1.
+	PrefillTokensPerTick int
+	DecodeTokensPerTick  int
 
 	ArrivalIntervalTicks int // ticks between successive task arrivals
 
-	// Physical GPU constraints — scaffolding for the VRAM eviction layer.
-	MaxKVCacheTokens          int // total VRAM capacity expressed in KV-cache tokens
+	// Physical GPU constraints.
+	MaxKVCacheTokens          int // total VRAM budget expressed in KV-cache tokens
 	ContextSwitchPenaltyTicks int // PCIe page-out + page-in cost when evicting a task
 
 	// If non-empty, the benchmark report is written to this path in addition
@@ -67,23 +79,28 @@ type SimResult struct {
 func GenerateWorkload(cfg SimConfig) ([]*AgentTask, []*AgentTask) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	interMin, interMax := cfg.InteractiveToks[0], cfg.InteractiveToks[1]
-	heavyMin, heavyMax := cfg.HeavyToks[0], cfg.HeavyToks[1]
+	randInRange := func(r [2]int) int { return r[0] + rng.Intn(r[1]-r[0]+1) }
 
 	original := make([]*AgentTask, cfg.NumTasks)
 	for i := range original {
-		tokens := interMin + rng.Intn(interMax-interMin+1)
-		if float64(i)/float64(cfg.NumTasks) >= cfg.InteractiveRatio {
-			tokens = heavyMin + rng.Intn(heavyMax-heavyMin+1)
+		var prefill, decode int
+		if float64(i)/float64(cfg.NumTasks) < cfg.InteractiveRatio {
+			prefill = randInRange(cfg.InteractivePrefillToks)
+			decode = randInRange(cfg.InteractiveDecodeToks)
+		} else {
+			prefill = randInRange(cfg.HeavyPrefillToks)
+			decode = randInRange(cfg.HeavyDecodeToks)
 		}
 		original[i] = &AgentTask{
-			TaskID:         fmt.Sprintf("task-%04d", i),
-			TokensRequired: tokens,
+			TaskID:                fmt.Sprintf("task-%04d", i),
+			Phase:                 PhasePrefill,
+			PrefillTokensRequired: prefill,
+			DecodeTokensRequired:  decode,
 		}
 	}
 
-	// Scatter heavy tasks throughout the slice so they are not clustered at
-	// the tail, which would artificially favour MLFQ.
+	// Scatter heavy tasks so they are not clustered at the tail, which would
+	// artificially favour MLFQ by front-loading interactive work.
 	rng.Shuffle(len(original), func(i, j int) { original[i], original[j] = original[j], original[i] })
 
 	return deepCopyTasks(original), deepCopyTasks(original)
@@ -98,10 +115,11 @@ func deepCopyTasks(src []*AgentTask) []*AgentTask {
 	return dst
 }
 
-// classifyTask returns classInteractive when TokensRequired falls within the
-// interactive band defined by cfg, classHeavy otherwise.
+// classifyTask returns classInteractive when the task's prefill size falls
+// within the interactive prefill band. The prefill range is the reliable
+// discriminator since interactive and heavy ranges are non-overlapping.
 func classifyTask(t *AgentTask, cfg SimConfig) taskClass {
-	if t.TokensRequired <= cfg.InteractiveToks[1] {
+	if t.PrefillTokensRequired <= cfg.InteractivePrefillToks[1] {
 		return classInteractive
 	}
 	return classHeavy
@@ -171,9 +189,13 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 		scheduler.Tick()
 
 		// Phase 4 — Observe: capture first-response and completion ticks.
+		// firstRspTick is recorded strictly when the task is in PhaseDecode with
+		// at least one decode token generated. This correctly models TTFT as the
+		// elapsed time from arrival to the moment the first output token appears,
+		// which includes the full prefill cost.
 		for _, r := range records {
 			t := r.task
-			if !firstRspSeen[t.TaskID] && !t.FirstResponse.IsZero() {
+			if !firstRspSeen[t.TaskID] && t.Phase == PhaseDecode && t.DecodeTokensProcessed >= 1 {
 				r.firstRspTick = tick
 				firstRspSeen[t.TaskID] = true
 			}
@@ -193,8 +215,8 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 
 		vramUsed := 0
 		for _, r := range records {
-			if r.task.TokensProcessed > 0 && !r.isEvicted && r.task.State != StateDone {
-				vramUsed += r.task.TokensProcessed
+			if r.task.TotalKVTokens() > 0 && !r.isEvicted && r.task.State != StateDone {
+				vramUsed += r.task.TotalKVTokens()
 			}
 		}
 
@@ -208,7 +230,7 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 		// no lower-priority alternatives remain.
 		candidates := make([]*taskRecord, 0)
 		for _, r := range records {
-			if !r.isEvicted && r.task.State == StateReady && r.task.TokensProcessed > 0 {
+			if !r.isEvicted && r.task.State == StateReady && r.task.TotalKVTokens() > 0 {
 				candidates = append(candidates, r)
 			}
 		}
@@ -223,7 +245,7 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 			if !scheduler.Evict(victim.task.TaskID) {
 				continue
 			}
-			vramUsed -= victim.task.TokensProcessed
+			vramUsed -= victim.task.TotalKVTokens()
 			victim.isEvicted = true
 			victim.penaltyRemaining = cfg.ContextSwitchPenaltyTicks
 			victim.task.State = StateBlocked
@@ -247,6 +269,7 @@ type metrics struct {
 	count          int
 	avgTurnaround  float64
 	p99FirstRspLat float64
+	avgTBT         float64 // average time between consecutive decode tokens
 }
 
 func computeMetrics(records []*taskRecord) metrics {
@@ -255,20 +278,31 @@ func computeMetrics(records []*taskRecord) metrics {
 	}
 
 	latencies := make([]float64, 0, len(records))
-	var totalTurnaround float64
+	var totalTurnaround, totalTBT float64
 
 	for _, r := range records {
 		latencies = append(latencies, float64(r.firstRspTick-r.arrivalTick))
 		totalTurnaround += float64(r.doneTick - r.arrivalTick)
+
+		// TBT is the average gap between consecutive output tokens.
+		// (doneTick - firstRspTick) spans the decode phase from the first token
+		// to the last. N output tokens produce N-1 inter-token intervals, so the
+		// denominator is max(1, DecodeTokensProcessed-1) to avoid division by
+		// zero for single-token tasks while keeping the unit consistent (ticks).
+		decodeSpan := float64(r.doneTick - r.firstRspTick)
+		intervals := math.Max(1.0, float64(r.task.DecodeTokensProcessed-1))
+		totalTBT += decodeSpan / intervals
 	}
 
 	sort.Float64s(latencies)
 	p99Idx := int(float64(len(latencies)-1) * 0.99)
+	n := float64(len(records))
 
 	return metrics{
 		count:          len(records),
-		avgTurnaround:  totalTurnaround / float64(len(records)),
+		avgTurnaround:  totalTurnaround / n,
 		p99FirstRspLat: latencies[p99Idx],
+		avgTBT:         totalTBT / n,
 	}
 }
 
@@ -296,8 +330,12 @@ func PrintBenchmarkReport(results [2]SimResult, cfg SimConfig) {
 	}
 	out := io.MultiWriter(writers...)
 
-	interLabel := fmt.Sprintf("INTERACTIVE TASKS (tokens %d–%d)", cfg.InteractiveToks[0], cfg.InteractiveToks[1])
-	heavyLabel := fmt.Sprintf("HEAVY BATCH TASKS (tokens %d–%d)", cfg.HeavyToks[0], cfg.HeavyToks[1])
+	interLabel := fmt.Sprintf("INTERACTIVE  prefill %d–%d  decode %d–%d",
+		cfg.InteractivePrefillToks[0], cfg.InteractivePrefillToks[1],
+		cfg.InteractiveDecodeToks[0], cfg.InteractiveDecodeToks[1])
+	heavyLabel := fmt.Sprintf("HEAVY BATCH  prefill %d–%d  decode %d–%d",
+		cfg.HeavyPrefillToks[0], cfg.HeavyPrefillToks[1],
+		cfg.HeavyDecodeToks[0], cfg.HeavyDecodeToks[1])
 
 	sep := strings.Repeat("─", 72)
 	hdr := strings.Repeat("═", 72)
@@ -326,12 +364,14 @@ func PrintBenchmarkReport(results [2]SimResult, cfg SimConfig) {
 	fmt.Fprintf(out, "  %-38s  %12d  %12d\n", "  Count", fifoI.count, mlfqI.count)
 	printRow("  Avg Turnaround Time", fifoI.avgTurnaround, mlfqI.avgTurnaround, "t")
 	printRow("  P99 First-Response Latency", fifoI.p99FirstRspLat, mlfqI.p99FirstRspLat, "t")
+	printRow("  Avg Time Between Tokens (TBT)", fifoI.avgTBT, mlfqI.avgTBT, "t")
 	fmt.Fprintln(out, sep)
 
 	fmt.Fprintf(out, "  %-38s\n", heavyLabel)
 	fmt.Fprintf(out, "  %-38s  %12d  %12d\n", "  Count", fifoH.count, mlfqH.count)
 	printRow("  Avg Turnaround Time", fifoH.avgTurnaround, mlfqH.avgTurnaround, "t")
 	printRow("  P99 First-Response Latency", fifoH.p99FirstRspLat, mlfqH.p99FirstRspLat, "t")
+	printRow("  Avg Time Between Tokens (TBT)", fifoH.avgTBT, mlfqH.avgTBT, "t")
 	fmt.Fprintln(out, hdr)
 	fmt.Fprintln(out)
 }
