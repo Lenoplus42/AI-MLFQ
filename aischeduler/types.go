@@ -37,6 +37,11 @@ type AgentTask struct {
 	State           TaskState
 	Phase           TaskPhase // Current execution phase; starts at PhasePrefill.
 
+	// ArrivalTick is the pre-calculated simulation tick at which this task
+	// enters the system, derived from a Poisson inter-arrival process during
+	// workload generation. RunSimulation submits the task when tick >= ArrivalTick.
+	ArrivalTick int
+
 	PrefillTokensRequired  int // Total prompt tokens to process.
 	PrefillTokensProcessed int // Prompt tokens consumed so far.
 	DecodeTokensRequired   int // Total output tokens to generate.

@@ -31,7 +31,11 @@ type SimConfig struct {
 	PrefillTokensPerTick int
 	DecodeTokensPerTick  int
 
-	ArrivalIntervalTicks int // ticks between successive task arrivals
+	// ArrivalRateLambda is the Poisson arrival rate (λ), expressed as the
+	// average number of tasks submitted per simulation tick. The mean
+	// inter-arrival gap is 1/λ ticks. For example λ=0.02 models one task
+	// arriving every 50 ticks on average; λ=0.2 models one every 5 ticks.
+	ArrivalRateLambda float64
 
 	// RunName tags this simulation run (e.g. "disaster", "light"). When set,
 	// trace output paths are derived automatically as
@@ -114,6 +118,22 @@ func GenerateWorkload(cfg SimConfig) ([]*AgentTask, []*AgentTask) {
 	// artificially favour MLFQ by front-loading interactive work.
 	rng.Shuffle(len(original), func(i, j int) { original[i], original[j] = original[j], original[i] })
 
+	// Assign Poisson inter-arrival ticks. Each inter-arrival gap is an
+	// independent Exp(λ) draw, which is the continuous-time process that
+	// defines a Poisson stream. The shuffle above ensures task classes are not
+	// correlated with arrival order.
+	currentTick := 0.0
+	for _, t := range original {
+		currentTick += rng.ExpFloat64() / cfg.ArrivalRateLambda
+		t.ArrivalTick = int(currentTick)
+	}
+	// Sort ascending so RunSimulation can consume tasks in order via a simple
+	// index pointer. int(currentTick) is non-decreasing so this is a no-op in
+	// practice, but the explicit sort guards against any future rounding edge.
+	sort.Slice(original, func(i, j int) bool {
+		return original[i].ArrivalTick < original[j].ArrivalTick
+	})
+
 	return deepCopyTasks(original), deepCopyTasks(original)
 }
 
@@ -137,8 +157,9 @@ func classifyTask(t *AgentTask, cfg SimConfig) taskClass {
 }
 
 // RunSimulation drives the scheduler until every submitted task reaches
-// StateDone, feeding tasks one-at-a-time at cfg.ArrivalIntervalTicks cadence
-// to replicate realistic Poisson-ish traffic rather than a thundering herd.
+// StateDone. Tasks are admitted according to pre-calculated Poisson arrival
+// ticks (task.ArrivalTick), yielding statistically correct inter-arrival gaps
+// without a thundering herd.
 //
 // When cfg.MaxKVCacheTokens > 0 the simulator enforces a VRAM budget: after
 // each scheduler tick it sums the KV-cache footprint (TokensProcessed) of all
@@ -177,13 +198,13 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 	for pending > 0 {
 		tick++
 
-		// Phase 1 — Admit: one new task enters every ArrivalIntervalTicks.
-		// Tasks that have not yet arrived are invisible to the scheduler, so a
-		// short task that arrives while a heavy task is running immediately
-		// becomes the highest-priority work item at Q0.
-		if nextSubmitIdx < len(tasks) && tick%cfg.ArrivalIntervalTicks == 0 {
+		// Phase 1 — Admit: submit every task whose pre-calculated Poisson
+		// ArrivalTick has been reached. A for loop is required because
+		// int(currentTick) rounding can collapse multiple draws onto the same
+		// tick, producing a valid Poisson burst.
+		for nextSubmitIdx < len(tasks) && tasks[nextSubmitIdx].ArrivalTick <= tick {
 			r := records[nextSubmitIdx]
-			r.arrivalTick = tick
+			r.arrivalTick = r.task.ArrivalTick // use exact Poisson arrival, not current tick
 			scheduler.SubmitTask(r.task)
 			nextSubmitIdx++
 		}

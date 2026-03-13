@@ -9,7 +9,7 @@ import (
 
 func main() {
 	cfg := aischeduler.SimConfig{
-		RunName: "disaster",
+		RunName: "h100_edge_of_chaos",
 
 		NumTasks:         5000,
 		InteractiveRatio: 0.85,
@@ -22,12 +22,12 @@ func main() {
 		PrefillTokensPerTick: 512,
 		DecodeTokensPerTick:  1,
 
-		ArrivalIntervalTicks: 5,
+		ArrivalRateLambda: 0.006, // λ = 0.2 → mean inter-arrival gap of 5 ticks
 
 		MaxKVCacheTokens:          200000,
 		ContextSwitchPenaltyTicks: 15,
 
-		ReportFilepath: fmt.Sprintf("benchmark_report/benchmark_report_%s.txt", "disaster"),
+		ReportFilepath: fmt.Sprintf("benchmark_report/benchmark_report_%s.txt", "h100_edge_of_chaos"),
 	}
 
 	fmt.Println("Booting AIOS MLFQ Benchmark Simulator...")
