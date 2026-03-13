@@ -296,6 +296,15 @@
       cursor: pointer;
     }
 
+    .upload-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0;
+      margin-top: 14px;
+    }
+
     footer {
       text-align: center;
       font-size: 0.65rem;
@@ -310,10 +319,20 @@
     <header>
       <h1>⟨ AIOS MLFQ SIMULATOR REPLAY ⟩</h1>
       <p class="subtitle">Discrete Event Simulation — KV Cache &amp; Queue Depth Trace Visualizer</p>
+      <div class="upload-bar">
+        <input type="file" id="traceUpload" accept=".json"
+               style="background:#1e1e1e;color:#4af626;border:1px solid #4af626;padding:5px;border-radius:4px;cursor:pointer;" />
+        <span id="statusText" style="margin-left:15px;color:#aaa;">Currently playing: None</span>
+      </div>
     </header>
 
     <div id="status">
-      <span class="loader"></span> Loading trace.json&hellip;
+      <p>Select a <code style="color:var(--amber)">trace_*.json</code> file above to load a simulation run.</p>
+      <p style="margin-top:8px;color:var(--muted);font-size:0.78rem">
+        Generate traces with <code style="color:var(--amber)">go run .</code> then serve
+        <code style="color:var(--amber)">web/</code> via
+        <code style="color:var(--amber)">python -m http.server 8080 --directory web</code>
+      </p>
     </div>
 
     <div id="main">
@@ -376,20 +395,22 @@
     'use strict';
 
     // ── DOM refs ────────────────────────────────────────────────────────────
-    const statusEl  = document.getElementById('status');
-    const mainEl    = document.getElementById('main');
-    const chartEl   = document.getElementById('chart');
-    const slider    = document.getElementById('slider');
-    const playBtn   = document.getElementById('playBtn');
-    const resetBtn  = document.getElementById('resetBtn');
-    const speedSel  = document.getElementById('speedSel');
-    const sTick     = document.getElementById('s-tick');
-    const sVram     = document.getElementById('s-vram');
-    const sQ0       = document.getElementById('s-q0');
-    const sQ1       = document.getElementById('s-q1');
-    const sQ2       = document.getElementById('s-q2');
-    const tickCur   = document.getElementById('tick-cur');
-    const tickMax   = document.getElementById('tick-max');
+    const statusEl    = document.getElementById('status');
+    const mainEl      = document.getElementById('main');
+    const chartEl     = document.getElementById('chart');
+    const slider      = document.getElementById('slider');
+    const playBtn     = document.getElementById('playBtn');
+    const resetBtn    = document.getElementById('resetBtn');
+    const speedSel    = document.getElementById('speedSel');
+    const sTick       = document.getElementById('s-tick');
+    const sVram       = document.getElementById('s-vram');
+    const sQ0         = document.getElementById('s-q0');
+    const sQ1         = document.getElementById('s-q1');
+    const sQ2         = document.getElementById('s-q2');
+    const tickCur     = document.getElementById('tick-cur');
+    const tickMax     = document.getElementById('tick-max');
+    const traceUpload = document.getElementById('traceUpload');
+    const statusText  = document.getElementById('statusText');
 
     // ── state ────────────────────────────────────────────────────────────────
     let snapshots = [];
@@ -413,9 +434,17 @@
 
     const fmtTick = n => n.toLocaleString();
 
-    // ── ECharts init ─────────────────────────────────────────────────────────
+    // ── ECharts — initialize once; buildChart only resets + re-options ───────
+    // Initialising once prevents duplicate resize listeners and avoids the
+    // overhead of tearing down and recreating the canvas on every file load.
+    chart = echarts.init(chartEl, null, { renderer: 'canvas' });
+    window.addEventListener('resize', () => chart.resize());
+
     function buildChart(lastTick) {
-      chart = echarts.init(chartEl, null, { renderer: 'canvas' });
+      // Clear previous rendering and all old series/markLine data so switching
+      // between a FIFO trace and an MLFQ trace with different VRAM limits works
+      // without stale threshold lines bleeding through.
+      chart.clear();
 
       const limitLine = maxKV > 0 ? [{
         yAxis: maxKV,
@@ -562,7 +591,6 @@
       };
 
       chart.setOption(opt);
-      window.addEventListener('resize', () => chart.resize());
     }
 
     // ── chart update (called on every slider change / play frame) ────────────
@@ -640,54 +668,69 @@
     });
 
     // ── data loading ─────────────────────────────────────────────────────────
-    fetch('trace.json')
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status} — ${r.statusText}`);
-        return r.json();
-      })
-      .then(data => {
-        snapshots = data.snapshots || [];
-        maxKV     = data.maxKVCacheTokens || 0;
 
-        if (!snapshots.length) {
-          throw new Error('trace.json contains no snapshots. Run the simulator first.');
+    function showError(msg) {
+      stopPlay();
+      mainEl.style.display   = 'none';
+      statusEl.style.display = '';
+      statusEl.innerHTML = `
+        <div class="error-box">
+          <p style="color:var(--red);font-size:1rem;margin-bottom:14px">⚠&nbsp; Failed to load trace</p>
+          <p style="color:var(--red);font-size:0.85rem">${msg}</p>
+        </div>`;
+    }
+
+    function loadTrace(data, filename) {
+      snapshots = data.snapshots || [];
+      maxKV     = data.maxKVCacheTokens || 0;
+
+      if (!snapshots.length) {
+        showError(`${filename} contains no snapshots — run the simulator first.`);
+        return;
+      }
+
+      // Stop any in-progress playback before replacing the dataset.
+      stopPlay();
+
+      // Pre-build flat [tick, value] arrays once for O(1) slice on every frame.
+      vramData = snapshots.map(s => [s.tick, s.vramUsage]);
+      q0Data   = snapshots.map(s => [s.tick, s.q0Len]);
+      q1Data   = snapshots.map(s => [s.tick, s.q1Len]);
+      q2Data   = snapshots.map(s => [s.tick, s.q2Len]);
+
+      const lastTick = snapshots[snapshots.length - 1].tick;
+
+      statusText.textContent = `Currently playing: ${filename}`;
+      statusEl.style.display = 'none';
+      mainEl.style.display   = 'flex';
+
+      // chart.clear() is called inside buildChart — resets old VRAM limit
+      // markLines and series data so previous trace state doesn't bleed through.
+      buildChart(lastTick);
+
+      curIdx = 0;
+      slider.max   = snapshots.length - 1;
+      slider.value = 0;
+      tickMax.textContent = fmtTick(lastTick);
+
+      renderFrame(0);
+    }
+
+    // File-picker: parse the selected JSON and hand off to loadTrace.
+    traceUpload.addEventListener('change', () => {
+      const file = traceUpload.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          loadTrace(JSON.parse(e.target.result), file.name);
+        } catch (err) {
+          showError(`Could not parse ${file.name}: ${err.message}`);
         }
-
-        // Pre-build flat [tick, value] arrays once for O(1) slice on every frame.
-        vramData = snapshots.map(s => [s.tick, s.vramUsage]);
-        q0Data   = snapshots.map(s => [s.tick, s.q0Len]);
-        q1Data   = snapshots.map(s => [s.tick, s.q1Len]);
-        q2Data   = snapshots.map(s => [s.tick, s.q2Len]);
-
-        const lastTick = snapshots[snapshots.length - 1].tick;
-
-        statusEl.style.display = 'none';
-        mainEl.style.display   = 'flex';
-
-        buildChart(lastTick);
-
-        slider.max   = snapshots.length - 1;
-        slider.value = 0;
-        tickMax.textContent = fmtTick(lastTick);
-
-        renderFrame(0);
-      })
-      .catch(err => {
-        statusEl.innerHTML = `
-          <div class="error-box">
-            <p style="color:var(--red);font-size:1rem;margin-bottom:14px">⚠&nbsp; Could not load trace.json</p>
-            <p>Run the Go simulator first:</p>
-            <p><code>go run .</code></p>
-            <p>Then serve the <code>web/</code> directory over HTTP:</p>
-            <p><code>python -m http.server 8080 --directory web</code></p>
-            <p>And open <code>http://localhost:8080</code> in your browser.</p>
-            <p style="margin-top:14px;color:var(--muted);font-size:0.8rem">
-              Note: <code>fetch()</code> is blocked by browsers when opening via <code>file://</code>.
-              A local HTTP server is required.
-            </p>
-            <p style="margin-top:10px;color:var(--red);font-size:0.8rem">Error: ${err.message}</p>
-          </div>`;
-      });
+      };
+      reader.readAsText(file);
+    });
   }());
   </script>
 </body>

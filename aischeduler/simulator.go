@@ -33,6 +33,12 @@ type SimConfig struct {
 
 	ArrivalIntervalTicks int // ticks between successive task arrivals
 
+	// RunName tags this simulation run (e.g. "disaster", "light"). When set,
+	// trace output paths are derived automatically as
+	// web/trace_<schedulerName>_<RunName>.json so successive runs never
+	// overwrite each other's files.
+	RunName string
+
 	// Physical GPU constraints.
 	MaxKVCacheTokens          int // total VRAM budget expressed in KV-cache tokens
 	ContextSwitchPenaltyTicks int // PCIe page-out + page-in cost when evicting a task
@@ -156,6 +162,13 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 	doneSet := make(map[string]bool, len(tasks))
 	firstRspSeen := make(map[string]bool, len(tasks))
 
+	// Derive the trace output path. RunName takes precedence over the explicit
+	// TraceFilepath so that multi-run sessions never collide on disk.
+	tracePath := cfg.TraceFilepath
+	if cfg.RunName != "" {
+		tracePath = fmt.Sprintf("web/trace_%s_%s.json", name, cfg.RunName)
+	}
+
 	tick := 0
 	nextSubmitIdx := 0
 	pending := len(tasks)
@@ -258,7 +271,7 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 		// post-eviction footprint. Recording the pre-eviction peak would make
 		// the trace appear to blow past MaxKVCacheTokens on every pressure tick,
 		// obscuring whether the budget is actually being enforced.
-		if cfg.TraceFilepath != "" && tick%traceSnapshotInterval == 0 {
+		if tracePath != "" && tick%traceSnapshotInterval == 0 {
 			ql := scheduler.GetQueueLengths()
 			snapshots = append(snapshots, TraceSnapshot{
 				Tick:      tick,
@@ -270,10 +283,12 @@ func RunSimulation(name string, scheduler *MLFQScheduler, tasks []*AgentTask, cf
 		}
 	}
 
-	if cfg.TraceFilepath != "" && len(snapshots) > 0 {
+	if tracePath != "" && len(snapshots) > 0 {
 		tf := TraceFile{MaxKVCacheTokens: cfg.MaxKVCacheTokens, Snapshots: snapshots}
-		if err := writeTrace(tf, cfg.TraceFilepath); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: could not write trace %q: %v\n", cfg.TraceFilepath, err)
+		if err := writeTrace(tf, tracePath); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: could not write trace %q: %v\n", tracePath, err)
+		} else {
+			fmt.Printf("Trace saved to: %s\n", tracePath)
 		}
 	}
 

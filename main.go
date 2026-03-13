@@ -9,7 +9,9 @@ import (
 
 func main() {
 	cfg := aischeduler.SimConfig{
-		NumTasks:        5000,
+		RunName: "disaster",
+
+		NumTasks:         5000,
 		InteractiveRatio: 0.85,
 
 		InteractivePrefillToks: [2]int{100, 500},
@@ -25,8 +27,7 @@ func main() {
 		MaxKVCacheTokens:          200000,
 		ContextSwitchPenaltyTicks: 15,
 
-		TraceFilepath:  "web/trace.json",
-		ReportFilepath: "benchmark_report/benchmark_report_h100_disaster.txt",
+		ReportFilepath: fmt.Sprintf("benchmark_report/benchmark_report_%s.txt", "disaster"),
 	}
 
 	fmt.Println("Booting AIOS MLFQ Benchmark Simulator...")
@@ -39,14 +40,9 @@ func main() {
 	fifoWorkload, mlfqWorkload := aischeduler.GenerateWorkload(cfg)
 	fmt.Printf("Workload generated in %v. Deep copies ready.\n\n", time.Since(start))
 
-	// The FIFO baseline does not write a trace — only the MLFQ challenger run
-	// produces the replay file consumed by web/index.html.
-	fifoCfg := cfg
-	fifoCfg.TraceFilepath = ""
-
 	fmt.Println("⏳ [1/2] Running Baseline: Single-Level FIFO Queue...")
-	fifoScheduler := aischeduler.NewMLFQScheduler(fifoCfg, []int{-1})
-	fifoResult := aischeduler.RunSimulation("FIFO", fifoScheduler, fifoWorkload, fifoCfg)
+	fifoScheduler := aischeduler.NewMLFQScheduler(cfg, []int{-1})
+	fifoResult := aischeduler.RunSimulation("FIFO", fifoScheduler, fifoWorkload, cfg)
 
 	fmt.Println("⚡ [2/2] Running Challenger: 3-Level MLFQ (Q0=10, Q1=50, Q2=FCFS)...")
 	mlfqScheduler := aischeduler.NewMLFQScheduler(cfg, []int{10, 50, -1})
