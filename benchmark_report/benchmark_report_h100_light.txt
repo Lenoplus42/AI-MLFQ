@@ -2,18 +2,18 @@
 ════════════════════════════════════════════════════════════════════════
   METRIC                                          FIFO          MLFQ
 ════════════════════════════════════════════════════════════════════════
-  Total Ticks to Drain                           29056         29056
+  Total Ticks to Drain                         2508485       2508485
 ────────────────────────────────────────────────────────────────────────
   INTERACTIVE  prefill 100–500  decode 10–50
-    Count                                          170           170
-    Avg Turnaround Time                      11278.26t      4020.19t  (-64.4%)
-    P99 First-Response Latency               27069.00t       981.00t  (-96.4%)
-    Avg Time Between Tokens (TBT)                1.00t       136.81t  (+13581.0%)
+    Count                                         4250          4250
+    Avg Turnaround Time                        166.83t        32.41t  (-80.6%)
+    P99 First-Response Latency                1519.00t         7.00t  (-99.5%)
+    Avg Time Between Tokens (TBT)                1.00t         1.08t  (+7.8%)
 ────────────────────────────────────────────────────────────────────────
   HEAVY BATCH  prefill 10000–30000  decode 500–1000
-    Count                                           30            30
-    Avg Turnaround Time                      14825.27t     18099.33t  (+22.1%)
-    P99 First-Response Latency               26271.00t      7425.00t  (-71.7%)
-    Avg Time Between Tokens (TBT)                1.00t        18.63t  (+1762.7%)
+    Count                                          750           750
+    Avg Turnaround Time                        955.06t      1027.33t  (+7.6%)
+    P99 First-Response Latency                1682.00t        78.00t  (-95.4%)
+    Avg Time Between Tokens (TBT)                1.00t         1.31t  (+31.0%)
 ════════════════════════════════════════════════════════════════════════
 
