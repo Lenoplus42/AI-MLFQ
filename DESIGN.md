@@ -14,7 +14,7 @@ The "Head-of-Line Blocking" problem in LLM inference occurs when long-context ba
 To ensure this simulation accurately reflects Data Center physics, we define the following constants:
 
 * **The Atomic Unit (1 Tick)**: Represents the minimal non-preemptible compute window. We define 1 Tick $\approx$ 15ms. In this window, the SMs process either a Chunked Prefill block (512 tokens) or a single Autoregressive Decode step (1 token).
-* **VRAM Capacity (MaxKVCacheTokens)**: For an 8B model (using GQA， FP16), a single KV cache token consumes roughly 128 KB. We strictly constrain the available KV cache pool to 200,000 tokens ($\approx$ 25.6 GB). This represents a highly congested multi-tenant VRAM partition, intentionally forcing the system to rely heavily on PCIe swapping.
+* **VRAM Capacity (MaxKVCacheTokens)**: For an 8B model (using GQA, FP16 precision), a single KV cache token consumes roughly 128 KB. We strictly constrain the available KV cache pool to 200,000 tokens ($\approx$ 25.6 GB). This represents a highly congested multi-tenant VRAM partition, intentionally forcing the system to rely heavily on PCIe swapping.
 * **The PCIe Penalty**: Moving a 20k token context over a PCIe 5.0 x16 bus takes time. We simulate this macro-switch (HBM ↔ Host DRAM) as ContextSwitchPenaltyTicks = 15.
 * **Poisson Arrivals ($\lambda = 0.02$)**: We model traffic using a true Poisson process. $\lambda = 0.02$ means, on average, 1 new request arrives every 50 ticks (750ms). 
 
