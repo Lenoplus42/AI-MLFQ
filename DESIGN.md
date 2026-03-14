@@ -13,10 +13,13 @@ The "Head-of-Line Blocking" problem in LLM inference occurs when long-context ba
 
 To ensure this simulation accurately reflects Data Center physics, we define the following constants:
 
-- **The Atomic Unit (1 Tick):** Corresponds to one Autoregressive Decode Step (generating exactly 1 token). In modern hardware, this takes roughly **15ms**.
-- **VRAM Capacity (`MaxKVCacheTokens`):** Represents the HBM (High Bandwidth Memory) limit after model weights are loaded. For an **NVIDIA H100 (80GB)** running an 8B model, we allocate **200,000 tokens** for the KV Cache pool.
-- **The PCIe Penalty:** * Micro-switches (SRAM ↔ HBM) take nanoseconds and are treated as 0 Ticks.
-    - Macro-switches (HBM ↔ PCIe ↔ Host RAM) are the true bottleneck. Moving a 20k token context (~6GB) over a **PCIe 5.0 x16** bus takes ~200ms. We simulate this as `ContextSwitchPenaltyTicks = 15`.
+* The Atomic Unit (1 Tick): Represents the minimal non-preemptible compute window. We define 1 Tick $\approx$ 15ms. In this window, the SMs process either a Chunked Prefill block (512 tokens) or a single Autoregressive Decode step (1 token).
+* VRAM Capacity (MaxKVCacheTokens): For an 8B model (using GQA), a single KV cache token consumes roughly 16 KB. We strictly constrain the available KV cache pool to 200,000 tokens ($\approx$ 3.2 GB). This represents a highly congested multi-tenant VRAM partition, intentionally forcing the system to rely heavily on PCIe swapping.
+* The PCIe Penalty: Moving a 20k token context over a PCIe 5.0 x16 bus takes time. We simulate this macro-switch (HBM ↔ Host DRAM) as ContextSwitchPenaltyTicks = 15.
+* Poisson Arrivals ($\lambda = 0.02$): We model traffic using a true Poisson process. $\lambda = 0.02$ means, on average, 1 new request arrives every 50 ticks (750ms). 
+
+Understanding the Disaster Load ($\rho$): 
+Our system takes ~718k ticks to drain 5000 tasks, meaning the physical service rate ($\mu$) is 1 task per 143 ticks. With an arrival rate of 1 task per 50 ticks, the Traffic Intensity ($\rho = \lambda / \mu$) is roughly 2.8. The system is receiving 280% more traffic than it can physically process, creating a brutal bottleneck that perfectly exposes the scheduler's behavior.
 
 ## 3. Architecture & Contracts
 
@@ -63,17 +66,16 @@ When `currentVRAMTokens > MaxKVCacheTokens`, the simulator triggers a Page Out. 
 
 ### **4.1 Key Metrics Defined**
 
-We evaluate system performance through two adversarial metrics.
+We evaluate system performance through three adversarial metrics:
+* P99 First-Response Latency (Time-To-First-Token or TTFT): The delay experienced by the slowest 1% of tasks before generating their first word. 
+* Average Time Between Tokens (TBT): Measures generation stuttering. Calculated as the time from the first decode token to the final token, divided by the decode length.
+* Average Turnaround Time: The total lifespan of a task. Used as our "cost" metric.
 
-**P99 First-Response Latency (Time-To-First-Token or TTFT)** measures the delay experienced by the slowest 1% of tasks before generating their first word. In interactive AI, a near-zero TTFT is the ultimate UX baseline; it prevents users from assuming the system has crashed. Conversely,
+Setup: A $\lambda = 0.02$ Poisson arrival disaster simulation (average 1 task per 750ms) with 5,000 agents, intentionally triggering severe VRAM thrashing.
 
-**Average Turnaround Time** measures the total lifespan of a task from submission to the final token. We use Turnaround as our "cost" metric to transparently show how much heavy-batch tasks are delayed to subsidize the instant responses of interactive agents.
-
-**Setup:** A flash crowd of 5,000 concurrent agents (85% interactive, 15% long-context 10k-30k tokens) flooding the system, intentionally triggering severe VRAM thrashing.
-
-- **The Interactive Rescue (-99.8% P99 Latency):** The P99 time-to-first-token for interactive tasks plummeted from a catastrophic 14,727,545 ticks (FIFO) to just **24,730 ticks** (MLFQ).
-- **Robin Hood Economics (+1.1% Turnaround):** The total turnaround time for massive 30k-token batch tasks increased by a mere 1.1%. A mathematically sound trade-off to subsidize immediate interactive responses.
-- **Conservation of Compute:** The total ticks to drain the entire workload (14,954,224) was identical for both FIFO and MLFQ. This proves the asynchronous DMA simulation: the GPU was kept at 100% utilization.
+* The Interactive Rescue (-100% P99 TTFT): Interactive TTFT plummeted from a catastrophic ~462k ticks (FIFO) to just 16 ticks (MLFQ). The AI feels completely instantaneous.
+* The TBT Trade-off (Human-Perceptible vs. Machine Wait): Because Q0 tasks are time-sharing, MLFQ Interactive TBT increased from 1.00t to 3.89t ($\approx$ 58ms per token). At ~17 tokens per second, this is still incredibly fluent for human reading. However, the Heavy Batch tasks absorbed the true physics tax, with their TBT skyrocketing to 492 ticks ($\approx$ 7.3 seconds between tokens) as they were constantly evicted to Host RAM.
+* Conservation of Compute: Total ticks to drain (718,323) was identical for both policies, proving our Compute-I/O Overlap keeps the GPU at 100% utilization despite the massive context switching.
 
 ## 5. Critical Real-World Limitations
 
