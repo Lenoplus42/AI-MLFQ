@@ -9,7 +9,7 @@
 ![H100 Disaster VRAM Trace](assets/disaster_trace.jpg)
 *(Above: A Trace-Based replay of the disaster benchmark. Notice the blue VRAM footprint constantly thrashing against the 200K limit, while MLFQ ruthlessly preempts purple heavy batches to clear the way for green interactive tasks.)*
 
-We simulated a system at the "Edge of Chaos" under a true Poisson arrival process ($\lambda = 0.02$). The workload consists of 5,000 concurrent agents (85% short interactive chats, 15% massive 30k-token RAG batches) hitting a strictly constrained 200k-token VRAM budget.
+We simulated a system at its disaster under a true Poisson arrival process ($\lambda = 0.02$). The workload consists of 5,000 concurrent agents (85% short interactive chats, 15% massive 30k-token RAG batches) hitting a strictly constrained 200k-token VRAM budget.
 
 By aggressively preempting heavy tasks and simulating realistic PCIe 4.0/5.0 Page-Out penalties, Interactive P99 Time-to-First-Token (TTFT) dropped to near-zero (-100%), with zero loss to overall system throughput. More importantly, under realistic Poisson traffic, the interactive generation fluency (TBT) remained imperceptible to humans.
 
